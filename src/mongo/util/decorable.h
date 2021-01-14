@@ -29,7 +29,6 @@
 
 /**
  * This header describes a mechanism for making "decorable" types.
- *
  * A decorable type is one to which various subsystems may attach subsystem-private data, so long as
  * they declare what that data will be before any instances of the decorable type are created.
  *

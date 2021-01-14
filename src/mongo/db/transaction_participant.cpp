@@ -468,17 +468,20 @@ void TransactionParticipant::Participant::_beginMultiDocumentTransaction(Operati
     p().autoCommit = false;
 
     stdx::lock_guard<Client> lk(*opCtx->getClient());
-    o(lk).txnState.transitionTo(TransactionState::kInProgress);
+    o(lk).txnState.transitionTo(TransactionState::kInProgress); // 更新txnState为kInProgress
 
-    // Start tracking various transactions metrics.
+    // Start tracking various transactions metrics. 开始跟踪各种事务指标
     //
     // We measure the start time in both microsecond and millisecond resolution. The TickSource
     // provides microsecond resolution to record the duration of the transaction. The start "wall
     // clock" time can be considered an approximation to the microsecond measurement.
+    // 使用微妙和毫秒来描述开始时间
+    // TickSource提供微秒级精确度来描述事务的持续时间
+    // 开始的 wall clock 时间可以被认为是微秒测量值的近似值 （这里是now的值）
     auto now = opCtx->getServiceContext()->getPreciseClockSource()->now();
     auto tickSource = opCtx->getServiceContext()->getTickSource();
 
-    o(lk).transactionExpireDate = now + Seconds(gTransactionLifetimeLimitSeconds.load());
+    o(lk).transactionExpireDate = now + Seconds(gTransactionLifetimeLimitSeconds.load()); // 事务过期的时间
 
     o(lk).transactionMetricsObserver.onStart(
         ServerTransactionsMetrics::get(opCtx->getServiceContext()),
@@ -486,7 +489,7 @@ void TransactionParticipant::Participant::_beginMultiDocumentTransaction(Operati
         tickSource,
         now,
         *o().transactionExpireDate);
-    invariant(p().transactionOperations.empty());
+    invariant(p().transactionOperations.empty()); //保证事务开始前，事务的操作集合应该是空的
 }
 
 void TransactionParticipant::Participant::beginOrContinue(OperationContext* opCtx,
@@ -496,7 +499,11 @@ void TransactionParticipant::Participant::beginOrContinue(OperationContext* opCt
     // Make sure we are still a primary. We need to hold on to the RSTL through the end of this
     // method, as we otherwise risk stepping down in the interim and incorrectly updating the
     // transaction number, which can abort active transactions.
-    repl::ReplicationStateTransitionLockGuard rstl(opCtx, MODE_IX);
+    // 首先要确保启动事务的将会是Primary节点
+    // 当在节点上启动一个事务，首先要确保获得全局的意向排它锁（RSTL的IX锁也会加上），直到事务结束后才释放。
+    //（例外是事务prepare后会释放RSTL锁，然后在事务提交或者中止后才重新获得该锁）
+    // 如果没有锁的保障，我们可能会危险地错误退出并错误更新事务编号，这可能会导致中断一个活跃的事务
+    repl::ReplicationStateTransitionLockGuard rstl(opCtx, MODE_IX); //以IX模式获得RSTL锁
     if (opCtx->writesAreReplicated()) {
         auto replCoord = repl::ReplicationCoordinator::get(opCtx);
         uassert(ErrorCodes::NotWritablePrimary,
@@ -570,7 +577,10 @@ void TransactionParticipant::Participant::beginOrContinue(OperationContext* opCt
         // 1. The transaction participant is in retryable write mode and has not yet executed a
         // retryable write, or
         // 2. A transaction is aborted and has not been involved in a two phase commit.
-        //
+        // 事务号只能在以下情况下被复用
+        // 1. retryable write模式且未执行过重试写
+        // 2. 事务被abort且未进入两阶段提交
+        // 
         // Assuming routers target primaries in increasing order of term and in the absence of
         // byzantine messages, this check should never fail.
         const auto restartableStates =
@@ -1108,6 +1118,7 @@ Timestamp TransactionParticipant::Participant::prepareTransaction(
 
     auto abortGuard = makeGuard([&] {
         // Prepare transaction on secondaries should always succeed.
+        // Secondary上的prepared section应该总是成功的
         invariant(!prepareOptime);
 
         try {

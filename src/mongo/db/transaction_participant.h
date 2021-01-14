@@ -65,6 +65,7 @@ class OperationContext;
 
 /**
  * Reason a transaction was terminated.
+ * 事务停止，要么是事务成功提交，要么是事务中断
  */
 enum class TerminationCause {
     kCommitted,
@@ -75,9 +76,13 @@ enum class TerminationCause {
  * This class maintains the state of a transaction running on a server session. It can only exist as
  * a decoration on the Session object and its state can only be modified by the thread which has the
  * session checked-out.
+ * 任何时刻，事务都应该与一个Session相关联，且一个事务也只能关联一个Session。
+ * 事务的状态通过TransactionParticipant类进行管理，且该类只能是Session对象的装饰器
+ * TODO: 理解任何线程尝试修改事务状态前，都必须用正确的的Session ID check out 对应的 Session
  *
  * Its methods are split in two groups with distinct read/write and concurrency control rules. See
  * the comments below for more information.
+ * 方法被拆分为2组，分别是 读写规则 和 并发控制规则
  */
 class TransactionParticipant {
     struct PrivateState;
@@ -88,6 +93,9 @@ class TransactionParticipant {
      * in any state but kInProgress, no more operations can be collected. Once the transaction is in
      * kPrepared, the transaction is not allowed to abort outside of an 'abortTransaction' command.
      * At this point, aborting the transaction must log an 'abortTransaction' oplog entry.
+     * 指示当前多文档事务的状态（若存在的话）
+     * 只有在kInProgress状态下才能增加新的操作
+     * 如果在kPrepread状态下，则事务不会abort，除非收到了abortTransaction命令
      */
     class TransactionState {
     public:
@@ -177,6 +185,8 @@ public:
     /**
      * Holds state for a snapshot read or multi-statement transaction in between network
      * operations.
+     * 保持一个 快照读 或者 multi-statement事务 的状态，在网络操作之中
+     * 这里的资源指的是事务的意向锁状态和存储状态
      */
     class TxnResources {
     public:
@@ -185,6 +195,7 @@ public:
         /**
          * Stashes transaction state from 'opCtx' in the newly constructed TxnResources.
          * Caller must hold the Client lock associated with opCtx, attested by WithLock.
+         * Caller必须要持有opCtx上的锁（通过WithLock机制保证）
          */
         TxnResources(WithLock, OperationContext* opCtx, StashStyle stashStyle) noexcept;
         ~TxnResources();
@@ -241,6 +252,11 @@ public:
      *  current WUOW. At destruction the original transaction will be restored by unstashing the
      *  recovery unit back onto the `opCtx` and restoring the locker state relevant to the original
      *  WUOW.
+     *  RAII：Resource Acquisition Is Initialization 资源获取就是初始化，是C++语言的一种管理资源、避免泄漏的方法
+     *  一个RAII对象，允许搁置当前事务并创建单独的事务。
+     *  其将RecoveryUnit从opCtx存储在栈中，并对opCtx使用相同的锁。
+     *  对于当前的WUOW使用两阶段锁
+     *  销毁时，通过将RecoveryUnit重新存到opCtx中并恢复与原始WUOW相同的锁即可恢复事务。
      */
     class SideTransactionBlock {
     public:
@@ -260,6 +276,7 @@ public:
 
     /**
      * Class used by observers to examine the state of a TransactionParticipant.
+     * 检验观察TransactionParticipant的状态
      */
     class Observer {
     public:
@@ -386,6 +403,8 @@ public:
         /**
          * Starts a new transaction (and if the txnNumber is newer aborts any in-progress
          * transaction on the session), or continues an already active transaction.
+         * 开启一个新事务，且如果txnNumber比任何在进行的事务大的话，中止在进行的事务（隐式终止该Session上前一个未提交的事务，若存在的话）；
+         * 或者继续一个正在进行中的事务。
          *
          * 'autocommit' comes from the 'autocommit' field in the original client request. The only
          * valid values are boost::none (meaning no autocommit was specified) and false (meaning
@@ -424,6 +443,8 @@ public:
          * Used only by the secondary oplog application logic. Similar to 'beginOrContinue' without
          * performing any checks for whether the new txnNumber will start a transaction number in
          * the past.
+         * 只被用于Secondary oplog应用逻辑中
+         * 类似于 beginOrContinue，只是没有对 txnNumber进行检查
          */
         void beginOrContinueTransactionUnconditionally(OperationContext* opCtx,
                                                        TxnNumber txnNumber);
@@ -459,8 +480,9 @@ public:
 
         /**
          * Puts a transaction into a prepared state and returns the prepareTimestamp.
-         *
+         * 转变事务为prepared状态，并且返回preparedTiemstamp
          * On secondary, the "prepareTimestamp" will be given in the oplog.
+         * TODO: 理解这里的given in the oplog是什么意思
          */
         Timestamp prepareTransaction(OperationContext* opCtx,
                                      boost::optional<repl::OpTime> prepareOptime);
@@ -499,6 +521,7 @@ public:
 
         /*
          * Aborts the transaction, releasing transaction resources.
+         * 中止事务，并释放事务对应的资源
          */
         void abortTransaction(OperationContext* opCtx);
 
@@ -506,6 +529,7 @@ public:
          * Adds a stored operation to the list of stored operations for the current multi-document
          * (non-autocommit) transaction.  It is illegal to add operations when no multi-document
          * transaction is in progress.
+         * 向当前的多文档事务中增加一个新的操作
          */
         void addTransactionOperation(OperationContext* opCtx, const repl::ReplOperation& operation);
 

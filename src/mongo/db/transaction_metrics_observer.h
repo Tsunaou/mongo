@@ -39,6 +39,7 @@ namespace mongo {
 /**
  * Updates transaction metrics (per-transaction metrics and server-wide transactions metrics) upon
  * the appropriate transaction event.
+ * 对适当的事务事件，更新事务的指标（包括每一个事务的指标和服务器端的事务指标）
  */
 class TransactionMetricsObserver {
 
