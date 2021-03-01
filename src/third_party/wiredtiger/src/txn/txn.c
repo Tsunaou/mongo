@@ -90,6 +90,7 @@ __txn_remove_from_global_table(WT_SESSION_IMPL *session)
 /*
  * __txn_sort_snapshot --
  *     Sort a snapshot for faster searching and set the min/max bounds.
+ *     对当前事务的snapshot进行排序
  */
 static void
 __txn_sort_snapshot(WT_SESSION_IMPL *session, uint32_t n, uint64_t snap_max)
@@ -184,6 +185,7 @@ done:
 /*
  * __txn_get_snapshot_int --
  *     Allocate a snapshot, optionally update our shared txn ids.
+ *     分配一个快照，可以有选择地更新当前事务的id
  */
 static void
 __txn_get_snapshot_int(WT_SESSION_IMPL *session, bool publish)
@@ -201,7 +203,8 @@ __txn_get_snapshot_int(WT_SESSION_IMPL *session, bool publish)
     txn_shared = WT_SESSION_TXN_SHARED(session);
     n = 0;
 
-    /* Fast path if we already have the current snapshot. */
+    /* Fast path if we already have the   current snapshot. */
+    // 如果当前的事务已经有快照了，则直接返回
     if ((commit_gen = __wt_session_gen(session, WT_GEN_COMMIT)) != 0) {
         if (F_ISSET(txn, WT_TXN_HAS_SNAPSHOT) && commit_gen == __wt_gen(session, WT_GEN_COMMIT))
             return;
@@ -219,11 +222,13 @@ __txn_get_snapshot_int(WT_SESSION_IMPL *session, bool publish)
      * Include the checkpoint transaction, if one is running: we should ignore any uncommitted
      * changes the checkpoint has written to the metadata. We don't have to keep the checkpoint's
      * changes pinned so don't go including it in the published pinned ID.
-     *
+     * 包括checkpoint事务，如果有一个事务正在运行，我们应该忽略任何checkpoint写在元数据上的uncommitted的改变。
+     * 我们并不保持checkpoint的改变pinned，使得在published pinned ID中不包括
      * We can assume that if a function calls without intention to publish then it is the special
      * case of checkpoint calling it twice. In which case do not include the checkpoint id.
      */
     if ((id = txn_global->checkpoint_txn_shared.id) != WT_TXN_NONE) {
+        // 如果当前session的事务ID就是checkpoint的事务ID，那么此时当前的Session正在做Checkpoint
         if (txn->id != id)
             txn->snapshot[n++] = id;
         if (publish)
@@ -232,6 +237,7 @@ __txn_get_snapshot_int(WT_SESSION_IMPL *session, bool publish)
 
     /* For pure read-only workloads, avoid scanning. */
     if (prev_oldest_id == current_id) {
+        //表示当前session id就是txn_global->oldest_id，也就是当前id处在id窗口最左端
         pinned_id = current_id;
         /* Check that the oldest ID has not moved in the meantime. */
         WT_ASSERT(session, prev_oldest_id == txn_global->oldest_id);
@@ -243,17 +249,24 @@ __txn_get_snapshot_int(WT_SESSION_IMPL *session, bool publish)
     for (i = 0, s = txn_global->txn_shared_list; i < session_cnt; i++, s++) {
         /*
          * Build our snapshot of any concurrent transaction IDs.
+         * 逻辑为：
          *
          * Ignore:
-         *  - Our own ID: we always read our own updates.
+         *  - Our own ID: we always read our own updates. 
+         *  - 我们总是看到自己的修改
          *  - The ID if it is older than the oldest ID we saw. This
          *    can happen if we race with a thread that is allocating
          *    an ID -- the ID will not be used because the thread will
          *    keep spinning until it gets a valid one.
+         *  - 如果ID小于我们看到的oldest ID，这可能发生在如果我们与一个正在分配ID的并发线程竞争时
+         *    这个ID将不会被使用因为线程将会自旋直到获得一个有效的ID
          *  - The ID if it is higher than the current ID we saw. This
          *    can happen if the transaction is already finished. In
          *    this case, we ignore this transaction because it would
          *    not be visible to the current snapshot.
+         *  - 如果这个ID大于我们看到的current ID，这可能发生在事务已经结束
+         *    这个情况下，我们将会忽略这个事务，因为这个事务对于我们当前的快照不可见
+         * 
          */
         while (s != txn_shared && (id = s->id) != WT_TXN_NONE && WT_TXNID_LE(prev_oldest_id, id) &&
           WT_TXNID_LT(id, current_id)) {
@@ -268,11 +281,13 @@ __txn_get_snapshot_int(WT_SESSION_IMPL *session, bool publish)
                  * check again here. The read of transaction ID should be carefully ordered: we want
                  * to re-read ID from transaction state after this transaction completes ID
                  * allocation.
+                 * 
                  */
                 WT_READ_BARRIER();
                 if (id == s->id) {
                     txn->snapshot[n++] = id;
                     if (WT_TXNID_LT(id, pinned_id))
+                        //比txn_global->current小的最小id，也就是离oldest id最近的未提交事务id
                         pinned_id = id;
                     break;
                 }
@@ -532,12 +547,13 @@ __txn_config_operation_timeout(WT_SESSION_IMPL *session, const char *cfg[], bool
 /*
  * __wt_txn_config --
  *     Configure a transaction.
+ *     主要是解析cfg中的各个关于事务的参数
  */
 int
 __wt_txn_config(WT_SESSION_IMPL *session, const char *cfg[])
 {
-    WT_CONFIG_ITEM cval;
-    WT_DECL_RET;
+    WT_CONFIG_ITEM cval; // TODO:不知道啥玩意
+    WT_DECL_RET; // #define WT_DECL_RET int ret = 0 
     WT_TXN *txn;
     wt_timestamp_t read_ts;
 
@@ -546,6 +562,7 @@ __wt_txn_config(WT_SESSION_IMPL *session, const char *cfg[])
     if (cfg == NULL)
         return (0);
 
+    // 以下主要是要获得txn->isolation，我们目前只关注snapshot isolation
     WT_ERR(__wt_config_gets_def(session, cfg, "isolation", 0, &cval));
     if (cval.len != 0)
         txn->isolation = WT_STRING_MATCH("snapshot", cval.str, cval.len) ?
@@ -561,6 +578,7 @@ __wt_txn_config(WT_SESSION_IMPL *session, const char *cfg[])
      *
      * We want to distinguish between inheriting implicitly and explicitly.
      */
+    // 以下主要是要获得txn->txn_logsync，表示是否要在事务提交后同步log records
     F_CLR(txn, WT_TXN_SYNC_SET);
     WT_ERR(__wt_config_gets_def(session, cfg, "sync", (int)UINT_MAX, &cval));
     if (cval.val == 0 || cval.val == 1)
@@ -577,6 +595,11 @@ __wt_txn_config(WT_SESSION_IMPL *session, const char *cfg[])
         txn->txn_logsync = 0;
 
     /* Check if prepared updates should be ignored during reads. */
+    // 以下主要是检查ignore_prepared参数。即是否忽略其他prepared事务的更新。
+    /*  若为ture，强制事务为只读事务   
+     *  若为force，则忽略prepared更新并允许写
+     */
+    // TODO: WiredTiger中也有prepared事务？
     WT_ERR(__wt_config_gets_def(session, cfg, "ignore_prepare", 0, &cval));
     if (cval.len > 0 && WT_STRING_MATCH("force", cval.str, cval.len))
         F_SET(txn, WT_TXN_IGNORE_PREPARE);
@@ -587,6 +610,8 @@ __wt_txn_config(WT_SESSION_IMPL *session, const char *cfg[])
      * Check if the prepare timestamp and the commit timestamp of a prepared transaction need to be
      * rounded up.
      */
+    // 对于prepared(commit)和read timestamp是否要四舍五入
+    // TODO: 涉及到和oldest timestamp的比较，详见https://source.wiredtiger.com/3.2.1/struct_w_t___s_e_s_s_i_o_n.html#a7e26b16b26b5870498752322fad790bf
     WT_ERR(__wt_config_gets_def(session, cfg, "roundup_timestamps.prepared", 0, &cval));
     if (cval.val)
         F_SET(txn, WT_TXN_TS_ROUND_PREPARED);
@@ -606,6 +631,7 @@ __wt_txn_config(WT_SESSION_IMPL *session, const char *cfg[])
         F_SET(txn, WT_TXN_TS_READ_BEFORE_OLDEST);
     }
 
+    // 设置read_timestamp
     WT_ERR(__wt_config_gets_def(session, cfg, "read_timestamp", 0, &cval));
     if (cval.len != 0) {
         WT_ERR(__wt_txn_parse_timestamp(session, "read", &read_ts, &cval));

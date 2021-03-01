@@ -1048,25 +1048,30 @@ retry:
  * __wt_txn_begin --
  *     Begin a transaction.
  */
+// 启动事务，生成当前系统事务快照，对应mongodb中的wriedtiger_snapshot_manager.cpp中的 session->begin_transaction
 static inline int
 __wt_txn_begin(WT_SESSION_IMPL *session, const char *cfg[])
 {
     WT_TXN *txn;
 
-    txn = session->txn;
-    txn->isolation = session->isolation;
-    txn->txn_logsync = S2C(session)->txn_logsync;
+    txn = session->txn; // 指向当前Session上事务的指针
+    txn->isolation = session->isolation; // 指向当前Session上的隔离级别
+    txn->txn_logsync = S2C(session)->txn_logsync; // 指向当前Session上日志的同步设置
 
     WT_ASSERT(session, !F_ISSET(txn, WT_TXN_RUNNING));
 
+    // 配置当前Session上的事务，从cfg中得到关于隔离级别，时间戳等信息（例如read timestamp，以及read timestamp之间的舍入关系等）
     WT_RET(__wt_txn_config(session, cfg));
 
     /*
      * Allocate a snapshot if required or update the existing snapshot. Do not update the existing
      * snapshot of autocommit transactions because they are committed at the end of the operation.
+     * 如果隔离等级是快照隔离，那么则分配一个快照，或者更新一个已有的快照。
+     * 对于autocommit的事务，并不需要更新已有的快照，因为他们会在操作的结尾自动提交
      */
     if (txn->isolation == WT_ISO_SNAPSHOT &&
       !(F_ISSET(txn, WT_TXN_AUTOCOMMIT) && F_ISSET(txn, WT_TXN_HAS_SNAPSHOT))) {
+        // TODO: 这里还意义不明
         if (session->ncursors > 0)
             WT_RET(__wt_session_copy_values(session));
 
@@ -1074,9 +1079,11 @@ __wt_txn_begin(WT_SESSION_IMPL *session, const char *cfg[])
          * Stall here if the cache is completely full. We have allocated a transaction ID which
          * makes it possible for eviction to decide we're contributing to the problem and return
          * WT_ROLLBACK. The WT_SESSION.begin_transaction API can't return rollback, continue on.
+         * 如果cache完全满了，那么在这里停滞一会。这里涉及到cache的问题，如果cache满了，将可能返回一个WT_ROLLBACK
          */
         WT_RET_ERROR_OK(__wt_cache_eviction_check(session, false, true, NULL), WT_ROLLBACK);
-
+        
+        // 得到一个快照
         __wt_txn_get_snapshot(session);
     }
 

@@ -65,6 +65,7 @@ class OperationContext;
 
 /**
  * Reason a transaction was terminated.
+ * MongoDB中导致事务终止的原因
  */
 enum class TerminationCause {
     kCommitted,
@@ -75,9 +76,11 @@ enum class TerminationCause {
  * This class maintains the state of a transaction running on a server session. It can only exist as
  * a decoration on the Session object and its state can only be modified by the thread which has the
  * session checked-out.
+ * 维护运行在服务器Session上的事务的状态
  *
  * Its methods are split in two groups with distinct read/write and concurrency control rules. See
  * the comments below for more information.
+ * 方法被分解成2组独立的规则：读写规则与并发控制规则
  */
 class TransactionParticipant {
     struct PrivateState;
@@ -88,6 +91,9 @@ class TransactionParticipant {
      * in any state but kInProgress, no more operations can be collected. Once the transaction is in
      * kPrepared, the transaction is not allowed to abort outside of an 'abortTransaction' command.
      * At this point, aborting the transaction must log an 'abortTransaction' oplog entry.
+     * 指示当前运行的多文档事务的状态。
+     * 事务只能在kInProgress的状态下才能collect operations
+     * kPrepared的事务只能由 abortTransaction 命令中止
      */
     class TransactionState {
     public:
@@ -101,7 +107,7 @@ class TransactionParticipant {
             kExecutedRetryableWrite = 1 << 6,
         };
 
-        using StateSet = int;
+        using StateSet = int; // 起别名
         bool isInSet(StateSet stateSet) const {
             return _state & stateSet;
         }
@@ -177,6 +183,7 @@ public:
     /**
      * Holds state for a snapshot read or multi-statement transaction in between network
      * operations.
+     * 维护snapshot read或网络操作中多状态事务的
      */
     class TxnResources {
     public:

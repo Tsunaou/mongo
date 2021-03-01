@@ -50,9 +50,13 @@ MongoDB uses multi-granular intent locking; see the [Concurrency FAQ][]. In all 
 ensure that operations to meta-data, such as creation and deletion of record stores, are serialized
 with respect to other accesses.
 
+MongoDB使用多粒度意向锁；在所有情况下确保对元数据的操作（例如记录存储的创建和删除）相对于其他访问是序列化的
+
 MongoDB uses [two-phase locking][] (2PL) to guarantee serializability of accesses to resources it
 manages. MongoDB will only use intent locks for the most common operations, leaving synchronization
 at the record store layer up to the storage engine.
+
+MongoDB使用两阶段锁定（2PL）来确保对其所管理资源的访问可序列化。 MongoDB将仅对最常见的操作使用意图锁，从而使记录存储层的同步保持到存储引擎。
 
 ### Transactions
 Each operation creates an OperationContext with a new RecoveryUnit, implemented by the storage
@@ -61,6 +65,8 @@ to the client live as long as that client cursor, with the operation context swi
 own recovery unit and that of the client cursor. In a few other cases an internal command may use
 an extra recovery unit as well. The recovery unit must implement transaction semantics as described
 below.
+
+每个操作都会创建一个由存储引擎实现的带有新RecoveryUnit的OperationContext，该RecoveryUnit将一直存在直到操作完成。恢复单元必须实现事务语义，如下所述。
 
 #### Atomicity
 Writes must only become visible when explicitly committed, and in that case all pending writes

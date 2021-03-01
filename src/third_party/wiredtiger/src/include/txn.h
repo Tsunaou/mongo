@@ -5,15 +5,19 @@
  *
  * See the file LICENSE for redistribution information.
  */
-
+// 事务ID范围默认在WT_TXN_NONE和WT_TXN_ABORTED之间，特殊情况就是下面这几个值
 #define WT_TXN_NONE 0                /* Beginning of time */
+// 初始状态
 #define WT_TXN_FIRST 1               /* First transaction to run */
 #define WT_TXN_MAX (UINT64_MAX - 10) /* End of time */
+// 表示事务回滚
 #define WT_TXN_ABORTED UINT64_MAX    /* Update rolled back */
 
+// TODO: TS 意义不明
 #define WT_TS_NONE 0         /* Beginning of time */
 #define WT_TS_MAX UINT64_MAX /* End of time */
 
+// Checkpoints 相关
 /* AUTOMATIC FLAG VALUE GENERATION START */
 #define WT_TXN_LOG_CKPT_CLEANUP 0x01u
 #define WT_TXN_LOG_CKPT_PREPARE 0x02u
@@ -42,8 +46,8 @@ typedef enum {
 /*
  * Transaction ID comparison dealing with edge cases.
  *
- * WT_TXN_ABORTED is the largest possible ID (never visible to a running transaction), WT_TXN_NONE
- * is smaller than any possible ID (visible to all running transactions).
+ * WT_TXN_ABORTED is the largest possible ID (never visible to a running transaction), 
+ * WT_TXN_NONE is smaller than any possible ID (visible to all running transactions).
  */
 #define WT_TXNID_LE(t1, t2) ((t1) <= (t2))
 
@@ -57,6 +61,10 @@ typedef enum {
 
 /*
  * Perform an operation at the specified isolation level.
+ * 在特定隔离级别下执行某个操作
+ * s: session
+ * iso: isolation level
+ * op: operatoins
  *
  * This is fiddly: we can't cope with operations that begin transactions (leaving an ID allocated),
  * and operations must not move our published snap_min forwards (or updates we need could be freed
@@ -86,11 +94,17 @@ typedef enum {
         txn_shared->pinned_id = saved_txn_shared.pinned_id;                     \
     } while (0)
 
+// _wt_txn_global.txn_shared_list：记录各个session的事务id信息（旧版本中叫__wt_txn_state）
 struct __wt_txn_shared {
     WT_CACHE_LINE_PAD_BEGIN
-    volatile uint64_t id;
-    volatile uint64_t pinned_id;
-    volatile uint64_t metadata_pinned;
+    volatile uint64_t id; // 执行事务的事务ID，赋值见__wt_txn_id_alloc
+    
+    // 比txn_global->current小的最小id，也就是离oldest id最接近的未提交事务id
+    volatile uint64_t pinned_id; // 赋值见__wt_txn_get_snapshot
+
+    // 表示当前session正在做checkpoint操作，也就是当前session做checkpoint的id，
+    // 注意:为该状态的session,有可能是在做checkpoint操作，参考__checkpoint_prepare
+    volatile uint64_t metadata_pinned; // 赋值见__wt_txn_get_snapshot
 
     /*
      * The first commit or durable timestamp used for this transaction. Determines its position in
@@ -115,7 +129,9 @@ struct __wt_txn_shared {
     WT_CACHE_LINE_PAD_END
 };
 
+// 多核下的全局事务管理器GTL
 struct __wt_txn_global {
+    // 全局写事务ID产生种子,一直递增  __wt_txn_id_alloc总自增 
     volatile uint64_t current; /* Current transaction ID. */
 
     /* The oldest running transaction ID (may race). */
@@ -124,8 +140,11 @@ struct __wt_txn_global {
     /*
      * The oldest transaction ID that is not yet visible to some transaction in the system.
      */
-    volatile uint64_t oldest_id;
+    // 系统中最早产生且还在执行的（未commit）写事务ID，即未提交事务中最小的事务ID
+    // 只有事务ID小于该ID的事务才是可见的，见__txn_visible_all_id
+    volatile uint64_t oldest_id; //赋值见__wt_txn_update_oldest
 
+    /* timestamp相关的赋值见__wt_txn_global_set_timestamp __wt_txn_commit*/
     wt_timestamp_t durable_timestamp;
     wt_timestamp_t last_ckpt_timestamp;
     wt_timestamp_t meta_ckpt_timestamp;
@@ -140,15 +159,19 @@ struct __wt_txn_global {
     bool oldest_is_pinned;
     bool stable_is_pinned;
 
+    // 全局id生成的锁（自旋锁）
     WT_SPINLOCK id_lock;
 
     /* Protects the active transaction states. */
+    // 活跃事务（正在执行未提交）状态锁
     WT_RWLOCK rwlock;
 
     /* Protects logging, checkpoints and transaction visibility. */
+    // logging，checkpoints和事务可见性锁
     WT_RWLOCK visibility_rwlock;
 
     /* List of transactions sorted by durable timestamp. */
+    // 通过durable timestamp排序的事务列表（注意这里跟3.0.0版本不一样）
     WT_RWLOCK durable_timestamp_rwlock;
     TAILQ_HEAD(__wt_txn_dts_qh, __wt_txn_shared) durable_timestamph;
     uint32_t durable_timestampq_len;
@@ -179,6 +202,7 @@ struct __wt_txn_global {
     WT_TXN_SHARED *txn_shared_list; /* Per-session shared transaction states */
 };
 
+/* wiredtiger 事务隔离类型，生效见__wt_txn_visible->__txn_visible_id */
 typedef enum __wt_txn_isolation {
     WT_ISO_READ_COMMITTED,
     WT_ISO_READ_UNCOMMITTED,
@@ -249,9 +273,12 @@ struct __wt_txn_op {
  * WT_TXN --
  *	Per-session transaction context.
  */
+// 
 struct __wt_txn {
-    uint64_t id;
+    // 事务的全局唯一ID，用于标识MVCC事务修改数据的版本。分配见__wt_txn_id_alloc
+    uint64_t id;  
 
+    // 隔离级别。赋值见__wt_txn_config，生效见__txn_visible_id
     WT_TXN_ISOLATION isolation;
 
     uint32_t forced_iso; /* Isolation is currently forced. */
@@ -261,9 +288,15 @@ struct __wt_txn {
      *	ids < snap_min are visible,
      *	ids > snap_max are invisible,
      *	everything else is visible unless it is in the snapshot.
+     *  可见的为 [0, snap_min) 和 [snap_min, snap_max]中的已提交事务
      */
+    // 在这个范围内的事务表示当前系统中正在操作的事务
     uint64_t snap_min, snap_max;
-    uint64_t *snapshot;
+
+    // 当前事务开始或者操作时刻其他正在执行且并未提交的事务集合,用于事务隔离
+    // snapshot数组，对应__wt_txn_init。数组内容默认在__txn_sort_snapshot中按照id排序
+    uint64_t *snapshot; 
+    // snapshot数组的长度
     uint32_t snapshot_count;
     uint32_t txn_logsync; /* Log sync configuration */
 

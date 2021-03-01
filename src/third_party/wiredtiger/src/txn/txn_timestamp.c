@@ -802,6 +802,7 @@ __wt_txn_set_read_timestamp(WT_SESSION_IMPL *session, wt_timestamp_t read_ts)
     WT_RET(__wt_txn_context_prepare_check(session));
 
     /* Read timestamps imply / require snapshot isolation. */
+    // 只有Snapshot Isolation才能设置read_timestamp
     if (!F_ISSET(txn, WT_TXN_RUNNING))
         txn->isolation = WT_ISO_SNAPSHOT;
     else if (txn->isolation != WT_ISO_SNAPSHOT)
@@ -816,6 +817,7 @@ __wt_txn_set_read_timestamp(WT_SESSION_IMPL *session, wt_timestamp_t read_ts)
      * This code is not using the timestamp validate function to avoid a race between checking and
      * setting transaction timestamp.
      */
+    // 获取全局事务管理器的rwlock
     __wt_readlock(session, &txn_global->rwlock);
 
     if (F_ISSET(txn, WT_TXN_TS_READ_BEFORE_OLDEST)) {
@@ -832,6 +834,7 @@ __wt_txn_set_read_timestamp(WT_SESSION_IMPL *session, wt_timestamp_t read_ts)
         /*
          * If given read timestamp is earlier than oldest timestamp then round the read timestamp to
          * oldest timestamp.
+         * 如果给定一个小于oldest timestamp的read timestamp，那么将read_timestamp舍入到oldest_timestamp
          */
         if (F_ISSET(txn, WT_TXN_TS_ROUND_READ)) {
             txn_shared->read_timestamp = ts_oldest;
@@ -845,6 +848,9 @@ __wt_txn_set_read_timestamp(WT_SESSION_IMPL *session, wt_timestamp_t read_ts)
              * MongoDB wants error context to make it easier to find those problems. Don't output an
              * error message because that logs a MongoDB error, use an informational message to
              * provide the context instead.
+             * 在一些情况下, MongoDB设置了一个比oldest timestamp还小的read timestamp, 依赖于WiredTiger
+             * 的并发控制来使这些设置失效。在其他情况下，这是一个bug，并且MongoDB希望错误的上下文能够容易
+             * 发现这些问题。不要输出错误信息因为那记录着MongoDB的错误，而应在上下文中使用错误信息
              */
             WT_RET(__wt_msg(session, "read timestamp %s less than the %s timestamp %s",
               __wt_timestamp_to_string(read_ts, ts_string[0]), use_pinned_ts ? "pinned" : "oldest",
