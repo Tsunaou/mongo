@@ -40,8 +40,10 @@
 namespace mongo {
 
 /**
- * When constructed, this object begins a WiredTiger transaction on the provided session. The
- * transaction will be rolled back if done() is not called before the object is destructed.
+ * When constructed, this object begins a WiredTiger transaction on the provided session. 
+ * The transaction will be rolled back if done() is not called before the object is destructed.
+ * 构造后，此对象将在提供的会话上开始WiredTiger事务。
+ * 如果在销毁对象之前未调用done（），则事务将回滚。
  */
 class WiredTigerBeginTxnBlock {
 public:

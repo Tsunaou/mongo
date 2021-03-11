@@ -10,6 +10,13 @@
 /perf.data.old
 /massif.out.*
 
+/bin
+/lib 
+/lib64
+/share
+
+pyvenv.cfg
+
 *~
 *.swp
 *.o

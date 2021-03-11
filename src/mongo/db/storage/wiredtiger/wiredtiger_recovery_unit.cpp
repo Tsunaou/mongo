@@ -291,6 +291,9 @@ void WiredTigerRecoveryUnit::abortUnitOfWork() {
 }
 
 void WiredTigerRecoveryUnit::_ensureSession() {
+    // 调用WiredTigerSessionCache::getSession()
+    // 选择是直接new新的UniqueWiredTigerSession
+    // 还是直接使用WiredTigerSessionCache._sessions缓存中的session
     if (!_session) {
         _session = _sessionCache->getSession();
     }
@@ -516,6 +519,12 @@ boost::optional<Timestamp> WiredTigerRecoveryUnit::getPointInTimeReadTimestamp()
     MONGO_UNREACHABLE;
 }
 
+/*
+ * WiredTigerRecoveryUnit 封装了 WiredTiger层的事务，其中
+ * RecoveryUnit::_txnOpen 对应于WT层的beginTransaction
+ * RecoveryUnit::_txnClose封装了WT层的commit_transaction和rollback_transaction
+ * WiredTigerRecoveryUnit::getSession第一次获取session的时候调用，在_ensureSession中确定_session
+ */
 void WiredTigerRecoveryUnit::_txnOpen() {
     invariant(!_isActive(), toString(_state));
     invariant(!_isCommittingOrAborting(),
@@ -527,6 +536,7 @@ void WiredTigerRecoveryUnit::_txnOpen() {
     if (shouldLog(kSlowTransactionSeverity)) {
         _timer.reset(new Timer());
     }
+    //获取WiredTigerSession._session，通过WiredTigerSession类的WT_SESSION* getSession()获取
     WT_SESSION* session = _session->getSession();
 
     switch (_timestampReadSource) {
@@ -556,6 +566,7 @@ void WiredTigerRecoveryUnit::_txnOpen() {
             break;
         }
         case ReadSource::kAllDurableSnapshot: {
+            // 当ReadConcern是快照隔离时，Readsource是kAllDurableSnapshot
             if (_readAtTimestamp.isNull()) {
                 _readAtTimestamp = _beginTransactionAtAllDurableTimestamp(session);
                 break;

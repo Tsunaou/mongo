@@ -143,6 +143,8 @@ __wt_txn_release_snapshot(WT_SESSION_IMPL *session)
 /*
  * __wt_txn_get_snapshot --
  *     Allocate a snapshot.
+ *     获取当前系统正在处理的所有事务信息，也即当前事务所快照
+ *     获取当前正在执行但还没有提交的事务快照，存储于txn->snapshot[]数组中
  */
 void
 __wt_txn_get_snapshot(WT_SESSION_IMPL *session)
@@ -171,20 +173,23 @@ __wt_txn_get_snapshot(WT_SESSION_IMPL *session)
     /* We're going to scan the table: wait for the lock. */
     __wt_readlock(session, &txn_global->rwlock);
 
-    current_id = pinned_id = txn_global->current;
-    prev_oldest_id = txn_global->oldest_id;
+    current_id = pinned_id = txn_global->current; // current表示当前的事务ID
+    prev_oldest_id = txn_global->oldest_id; // 表示最早的未提交的事务ID，只有小于该ID的事务才是可见的
 
     /*
      * Include the checkpoint transaction, if one is running: we should ignore any uncommitted
      * changes the checkpoint has written to the metadata. We don't have to keep the checkpoint's
      * changes pinned so don't including it in the published pinned ID.
+     * 判断是否是Checkpoint相关
      */
     if ((id = txn_global->checkpoint_state.id) != WT_TXN_NONE) {
         txn->snapshot[n++] = id;
         txn_state->metadata_pinned = id;
     }
 
-    /* For pure read-only workloads, avoid scanning. */
+    /* For pure read-only workloads, avoid scanning. 
+     * 对于纯只读workload，就不用扫描了
+     */
     if (prev_oldest_id == current_id) {
         txn_state->pinned_id = current_id;
         /* Check that the oldest ID has not moved in the meantime. */
@@ -192,28 +197,33 @@ __wt_txn_get_snapshot(WT_SESSION_IMPL *session)
         goto done;
     }
 
-    /* Walk the array of concurrent transactions. */
+    /* Walk the array of concurrent transactions. 
+     * 遍历并发事务的数组。凡是transaction_id != WT_TXN_NONE的都是正在执行且具有写操作的事务
+     */
     WT_ORDERED_READ(session_cnt, conn->session_cnt);
     for (i = 0, s = txn_global->states; i < session_cnt; i++, s++) {
         /*
          * Build our snapshot of any concurrent transaction IDs.
          *
          * Ignore:
-         *  - Our own ID: we always read our own updates.
-         *  - The ID if it is older than the oldest ID we saw. This
+         *  - 1. Our own ID: we always read our own updates.
+         *  - 2. The ID if it is older than the oldest ID we saw. This
          *    can happen if we race with a thread that is allocating
          *    an ID -- the ID will not be used because the thread will
          *    keep spinning until it gets a valid one.
-         *  - The ID if it is higher than the current ID we saw. This
+         *  - 3. The ID if it is higher than the current ID we saw. This
          *    can happen if the transaction is already finished. In
          *    this case, we ignore this transaction because it would
          *    not be visible to the current snapshot.
          */
-        while (s != txn_state && (id = s->id) != WT_TXN_NONE && WT_TXNID_LE(prev_oldest_id, id) &&
-          WT_TXNID_LT(id, current_id)) {
+        while (s != txn_state && // txn_state表示当前Session的信息，对应忽略规则1
+                (id = s->id) != WT_TXN_NONE && // 正在执行且具有写操作的事务
+                WT_TXNID_LE(prev_oldest_id, id) && // 对应忽略规则2
+                WT_TXNID_LT(id, current_id)) { // 对应忽略规则3
             /*
              * If the transaction is still allocating its ID, then we spin here until it gets its
              * valid ID.
+             * 自旋等待事务ID都分配完毕
              */
             WT_READ_BARRIER();
             if (!s->is_allocating) {
@@ -227,6 +237,7 @@ __wt_txn_get_snapshot(WT_SESSION_IMPL *session)
                 if (id == s->id) {
                     txn->snapshot[n++] = id;
                     if (WT_TXNID_LT(id, pinned_id))
+                        // 比txn_global->current小的最小id，也就是离oldest id最近的未提交事务id
                         pinned_id = id;
                     break;
                 }
@@ -495,6 +506,7 @@ __wt_txn_config(WT_SESSION_IMPL *session, const char *cfg[])
     if (cfg == NULL)
         return (0);
 
+    // 获取txn->isolation的值
     WT_RET(__wt_config_gets_def(session, cfg, "isolation", 0, &cval));
     if (cval.len != 0)
         txn->isolation = WT_STRING_MATCH("snapshot", cval.str, cval.len) ?

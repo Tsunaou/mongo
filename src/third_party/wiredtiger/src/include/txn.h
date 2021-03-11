@@ -103,17 +103,24 @@ struct __wt_named_snapshot {
     uint32_t snapshot_count;
 };
 
+// 记录各个Seesion的事务ID信息
 struct __wt_txn_state {
     WT_CACHE_LINE_PAD_BEGIN
-    volatile uint64_t id;
-    volatile uint64_t pinned_id;
+    volatile uint64_t id; // 执行事务的事务ID
+    volatile uint64_t pinned_id; // 表示当前Session正在做Checkpoint操作
     volatile uint64_t metadata_pinned;
     volatile bool is_allocating;
 
     WT_CACHE_LINE_PAD_END
 };
 
+
+/*
+ * 一个conn中包含多个session,每个session有一个对应的事务txn信息
+ * 该结构用于全局事务管理，__wt_connection_impl.txn_global  该全局锁针对整个conn
+ */
 struct __wt_txn_global {
+    // 全局写事务ID产生的种子，一直递增，赋值见 __wt_txn_id_alloc
     volatile uint64_t current; /* Current transaction ID. */
 
     /* The oldest running transaction ID (may race). */
@@ -121,16 +128,47 @@ struct __wt_txn_global {
 
     /*
      * The oldest transaction ID that is not yet visible to some transaction in the system.
+     * 系统中最早产生且还在执行的写事务ID，赋值见 __wt_txn_update_oldest
+     * 其为未提交事务中最小的一个事务ID，只有ID小于该值的事务才是可见的，见 __txn_visible_all_id
      */
     volatile uint64_t oldest_id;
 
     wt_timestamp_t durable_timestamp;
+
+    /*
+     * 上一个检查点运行的时间。如果没有，则为0。
+     * last_checkpoint<=stable timestamp
+     */
     wt_timestamp_t last_ckpt_timestamp;
     wt_timestamp_t meta_ckpt_timestamp;
+
+
+    /*
+     * WiredTiger 提供设置 oldest timestamp 的功能，允许由 MongoDB 来设置该时间戳，含义是Read as of a timestamp 
+     * 不会提供更小的时间戳来进行一致性读，也就是说，WiredTiger 无需维护 oldest timestamp 之前的所有历史版本。
+     * MongoDB 层需要频繁（及时）更新 oldest timestamp，避免让 WT cache 压力太大
+	*/
     wt_timestamp_t oldest_timestamp;
-    wt_timestamp_t pinned_timestamp;
-    wt_timestamp_t recovery_timestamp;
+
+    /*
+     * the oldest timestamp that has to be maintained for current or future readers
+     * 为了当前或未来的读者所维护的最小时间戳。
+     * 最小值 min(oldest_read timestamp, oldest timestamp)
+	 */
+    wt_timestamp_t pinned_timestamp; 
+    wt_timestamp_t recovery_timestamp; /* stable timestamp使用的，在最后一次关shutdown之前，在最近的检查点使用的stable timestamp(如果有的话)。*/
+
+    /*
+     * 任何commit timestamp小于或等于当前stable timestamp的活跃事务都不能修改数据，准备好的事务实例除外。这个时间戳可以通过API设置
+     * oldest timestamp <= stable timestamp
+     * 
+     * 4.0 版本实现了存储引擎层的回滚机制，当复制集节点需要回滚时，直接调用 WiredTiger 接口，将数据回滚到某个稳定版本（实际上就是一个 Checkpoint）
+     * 这个稳定版本则依赖于 stable timestamp。WiredTiger 会确保 stable timestamp 之后的数据不会写到 Checkpoint里，
+     * MongoDB 根据复制集的同步状态，当数据已经同步到大多数节点时（Majority commited），会更新 stable timestamp，
+     * 因为这些数据已经提交到大多数节点了，一定不会发生 ROLLBACK，这个时间戳之前的数据就都可以写到 Checkpoint 里了。
+	*/
     wt_timestamp_t stable_timestamp;
+
     bool has_durable_timestamp;
     bool has_oldest_timestamp;
     bool has_pinned_timestamp;
@@ -138,7 +176,7 @@ struct __wt_txn_global {
     bool oldest_is_pinned;
     bool stable_is_pinned;
 
-    WT_SPINLOCK id_lock;
+    WT_SPINLOCK id_lock; //全局id生成的锁
 
     /* Protects the active transaction states. */
     WT_RWLOCK rwlock;
@@ -251,11 +289,17 @@ struct __wt_txn_op {
 /*
  * WT_TXN --
  *	Per-session transaction context.
+ *  每一个Session的事务上下文
  */
 struct __wt_txn {
-    uint64_t id;
+    /*
+     * 该事务拥有的全局唯一ID，用于标识事务修改数据的版本号。
+     * 由全局分配器分配，每个事务都有一个非重复的id
+     * 赋值由__wt_txn_id_alloc函数处理
+     */ 
+    uint64_t id; 
 
-    WT_TXN_ISOLATION isolation;
+    WT_TXN_ISOLATION isolation; /* 隔离级别 */
 
     uint32_t forced_iso; /* Isolation is currently forced. */
 
@@ -264,33 +308,48 @@ struct __wt_txn {
      *	ids < snap_min are visible,
      *	ids > snap_max are invisible,
      *	everything else is visible unless it is in the snapshot.
+     *  标识当前事务可见范围的区间
      */
     uint64_t snap_min, snap_max;
+    /*
+     * 系统事务对象数组，保存系统中所有的事务对象,保存的是正在执行事务的区间的事务对象序列
+     * 当前事务开始或者操作时刻其他正在执行且并未提交的事务集合,用于事务隔离
+     * 数组内容默认在__txn_sort_snapshot中按照id排序
+     */ 
     uint64_t *snapshot;
-    uint32_t snapshot_count;
+    uint32_t snapshot_count; /* snapshot数组的大小 */
     uint32_t txn_logsync; /* Log sync configuration */
 
     /*
      * Timestamp copied into updates created by this transaction.
-     *
      * In some use cases, this can be updated while the transaction is running.
+     * 表示事务提交的时间。真正生效是在
+     * - __wt_txn_commit中影响全局txn_global->commit_timestamp
+     * - __wt_txn_set_commit_timestamp中影响全局队列txn_global->commit_timestamph
+     * 从而影响了
+     * - __wt_txn_update_pinned_timestamp
+     * - txn_global_query_timestamp
+     * 实际上是通过影响pinned_timestamp(__wt_txn_visible_all)来影响可见性的
      */
     wt_timestamp_t commit_timestamp;
 
     /*
      * Durable timestamp copied into updates created by this transaction. It is used to decide
      * whether to consider this update to be persisted or not by stable checkpoint.
+     * 表示事务修改的数据已持久化的时间，与具体操作里面的durable_ts字段关联。
      */
     wt_timestamp_t durable_timestamp;
 
     /*
      * Set to the first commit timestamp used in the transaction and fixed while the transaction is
      * on the public list of committed timestamps.
+     * 把当前session上一次操作的commit_timestamp保存到first_commit_timestamp
      */
     wt_timestamp_t first_commit_timestamp;
 
     /*
      * Timestamp copied into updates created by this transaction, when this transaction is prepared.
+     * 表示事务开始准备的时间。
      */
     wt_timestamp_t prepare_timestamp;
 
@@ -303,7 +362,13 @@ struct __wt_txn {
     bool clear_durable_q;
     bool clear_read_q; /* Set if need to clear from the read queue */
 
-    /* Array of modifications by this transaction. */
+    /* Array of modifications by this transaction. 
+     * 当前事务操作的修改数组，记录了本session对应的事务的所有写操作信息，用于事务回滚
+     * 见__wt_txn_log_op
+     * 赋值见__txn_next_op中分配WT_TXN_OP
+     * WT_TXN和__wt_txn_op在__txn_next_op中关联起来
+     * 在内存中的update结构信息，就是存入该数组对应成员中的
+     */
     WT_TXN_OP *mod;
     size_t mod_alloc;
     u_int mod_count;

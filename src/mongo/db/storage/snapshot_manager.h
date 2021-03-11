@@ -41,9 +41,11 @@ namespace mongo {
 
 /**
  * Manages snapshots that can be read from at a later time.
+ * 管理未来可以读取的快照 WiredTigerSnapshotManager继承于该类
  *
  * Implementations must be able to handle concurrent access to any methods. No methods are allowed
  * to acquire locks from the LockManager.
+ * 实现必须能够处理任意方法的并发访问控制，没有方法呗允许从LockManager获得锁
  */
 class SnapshotManager {
 public:

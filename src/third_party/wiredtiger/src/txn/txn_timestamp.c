@@ -636,6 +636,14 @@ __txn_assert_after_reads(
  *     oldest timestamp and transaction is configured to roundup timestamps of a prepared
  *     transaction, then we will roundup the commit timestamp to the prepare timestamp of the
  *     transaction.
+ *     验证事务的提交时间戳。
+ *     如果 commit timestamp < oldest timestamp 且事务被配置为对prepared事务进行时间戳的舍入，则将会把commit timestamp舍入到prepare timestamp 
+ * 
+ * 如果mongodb调用以下接口之一时都会执行该函数
+ * - WT_SESSION->timestamp_transaction(指定commit_timestamp配置项)
+ * - session->commit_transaction(并且指定commit_timestamp配置项)
+ * 向全局队列txn_global->commit_timestamph中添加该txn
+ *     
  */
 int
 __wt_txn_set_commit_timestamp(WT_SESSION_IMPL *session, wt_timestamp_t commit_ts)
@@ -649,6 +657,7 @@ __wt_txn_set_commit_timestamp(WT_SESSION_IMPL *session, wt_timestamp_t commit_ts
     /* Added this redundant initialization to circumvent build failure. */
     oldest_ts = stable_ts = WT_TS_NONE;
 
+    // 只有在快照隔离模式下才能进行这个操作
     if (txn->isolation != WT_ISO_SNAPSHOT)
         WT_RET_MSG(session, EINVAL,
           "setting a commit_timestamp requires a transaction running at snapshot isolation");
@@ -668,6 +677,9 @@ __wt_txn_set_commit_timestamp(WT_SESSION_IMPL *session, wt_timestamp_t commit_ts
         /*
          * For a non-prepared transactions the commit timestamp should not be less than the stable
          * timestamp.
+         * 对于未prepared事务
+         * - commit timestamp >= oldest timestamp
+         * - commit timestamp >= stable timestamp
          */
         if (has_oldest_ts && commit_ts < oldest_ts)
             WT_RET_MSG(session, EINVAL, "commit timestamp %s is less than the oldest timestamp %s",
