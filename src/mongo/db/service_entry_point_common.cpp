@@ -543,6 +543,7 @@ bool runCommandImpl(OperationContext* opCtx,
         invocation->supportsWriteConcern() || command->getLogicalOp() == LogicalOp::opGetMore;
 
     if (shouldWaitForWriteConcern) {
+        // 获得该Client上的上一个操作
         auto lastOpBeforeRun = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
 
         // Change the write concern while running the command.
@@ -561,6 +562,7 @@ bool runCommandImpl(OperationContext* opCtx,
                 validateWriteConcernForTransaction(*extractedWriteConcern,
                                                    invocation->definition()->getName());
             }
+            // 设置当前操作的WriteConcern值
             opCtx->setWriteConcern(*extractedWriteConcern);
         }
 
@@ -668,6 +670,8 @@ bool runCommandImpl(OperationContext* opCtx,
  * also checks that the command is permissible to run on the node given its current
  * replication state. All the logic here is independent of any particular command; any
  * functionality relevant to a specific command should be confined to its run() method.
+ * mongos流程：ServiceEntryPointMongos::handleRequest->Strategy::clientCommand->runCommand
+ * mongod流程：ServiceEntryPointMongod::handleRequest->runCommands->execCommandDatabase调用
  */
 void execCommandDatabase(OperationContext* opCtx,
                          Command* command,
@@ -994,6 +998,9 @@ void curOpCommandSetup(OperationContext* opCtx, const OpMsgRequest& request) {
     curop->setNS_inlock(nss.ns());
 }
 
+/*
+ * mongodb语句的解析
+ */
 DbResponse receivedCommands(OperationContext* opCtx,
                             const Message& message,
                             const ServiceEntryPointCommon::Hooks& behaviors) {
@@ -1299,6 +1306,7 @@ BSONObj ServiceEntryPointCommon::getRedactedCopyForLogging(const Command* comman
     return bob.obj();
 }
 
+//mongod服务对于客户端请求的处理  ServiceStateMachine::_processMessage或者loopbackBuildResponse中调用
 DbResponse ServiceEntryPointCommon::handleRequest(OperationContext* opCtx,
                                                   const Message& m,
                                                   const Hooks& behaviors) {

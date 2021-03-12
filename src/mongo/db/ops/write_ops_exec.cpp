@@ -297,6 +297,10 @@ void insertDocuments(OperationContext* opCtx,
     // physically written in timestamp order, so we defer optime assignment until the oplog is about
     // to be written. Multidocument transactions should not generate opTimes because they are
     // generated at the time of commit.
+    /* 获取optime，并为批次中的每个项目填写它们。仅对于doc-locking存储引擎必须执行此操作，而doc-locking存储引擎允许按时间戳顺序插入oplog文档。 
+     * 对于其他存储引擎，必须以时间戳记顺序物理写入oplog条目，因此我们将optime分配推迟到要写入oplog之前。 
+     * 多文档事务不应生成opTime，因为它们是在提交时生成的。
+     */
     auto batchSize = std::distance(begin, end);
     if (supportsDocLocking()) {
         auto replCoord = repl::ReplicationCoordinator::get(opCtx);
@@ -430,6 +434,7 @@ bool insertBatchAndHandleErrors(OperationContext* opCtx,
 
     // Try to insert the batch one-at-a-time. This path is executed for singular batches,
     // multi-statement transactions, capped collections, and if we failed all-at-once inserting.
+    // 多文档事务从这里开始插入：一个一个插入
     for (auto it = batch.begin(); it != batch.end(); ++it) {
         globalOpCounters.gotInsert();
         ServerWriteConcernMetrics::get(opCtx)->recordWriteConcernForInsert(
@@ -491,8 +496,9 @@ SingleWriteResult makeWriteResultForInsertOrDeleteRetry() {
 WriteResult performInserts(OperationContext* opCtx,
                            const write_ops::Insert& wholeOp,
                            bool fromMigrate) {
-    // Insert performs its own retries, so we should only be within a WriteUnitOfWork when run in a
-    // transaction.
+    // Insert performs its own retries, so we should only be within a WriteUnitOfWork when run in a transaction.
+    // 插入操作会执行其自己的重试，因此只有在事务中才会在一个WriteUnitOfWork中
+    // 新建一个txnParticipant
     auto txnParticipant = TransactionParticipant::get(opCtx);
     invariant(!opCtx->lockState()->inAWriteUnitOfWork() ||
               (txnParticipant && opCtx->inMultiDocumentTransaction()));
@@ -500,6 +506,7 @@ WriteResult performInserts(OperationContext* opCtx,
     ON_BLOCK_EXIT([&] {
         // This is the only part of finishCurOp we need to do for inserts because they reuse the
         // top-level curOp. The rest is handled by the top-level entrypoint.
+        // performInserts函数执行完后调用该函数
         curOp.done();
         Top::get(opCtx->getServiceContext())
             .record(opCtx,
@@ -512,13 +519,14 @@ WriteResult performInserts(OperationContext* opCtx,
     });
 
     {
-        stdx::lock_guard<Client> lk(*opCtx->getClient());
-        curOp.setNS_inlock(wholeOp.getNamespace().ns());
-        curOp.setLogicalOp_inlock(LogicalOp::opInsert);
-        curOp.ensureStarted();
+        stdx::lock_guard<Client> lk(*opCtx->getClient());   //该链接对应客户端上锁
+        curOp.setNS_inlock(wholeOp.getNamespace().ns());    //设置当前操作的集合名
+        curOp.setLogicalOp_inlock(LogicalOp::opInsert);     //设置操作类型
+        curOp.ensureStarted();                              //设置该操作开始时间
         curOp.debug().additiveMetrics.ninserted = 0;
     }
 
+    //例如use test;db.test.insert({"yang":1, "ya":2}),则_nss为test.test, _dbname为test
     uassertStatusOK(userAllowedWriteNS(wholeOp.getNamespace()));
 
     DisableDocumentValidationIfTrue docValidationDisabler(
@@ -528,7 +536,7 @@ WriteResult performInserts(OperationContext* opCtx,
     WriteResult out;
     out.results.reserve(wholeOp.getDocuments().size());
 
-    bool containsRetry = false;
+    bool containsRetry = false; //是否需要重试
     ON_BLOCK_EXIT([&] { updateRetryStats(opCtx, containsRetry); });
 
     size_t stmtIdIndex = 0;
@@ -538,15 +546,18 @@ WriteResult performInserts(OperationContext* opCtx,
     const size_t maxBatchBytes = write_ops::insertVectorMaxBytes;
     batch.reserve(std::min(wholeOp.getDocuments().size(), maxBatchSize));
 
+    // 对操作中涉及的每个文档进行操作
     for (auto&& doc : wholeOp.getDocuments()) {
+        // 是否wholeOp中从网络接收到的最后一个document(例如客户端一次性insert多个doc，则这里就是确定是否是最后一个doc)
         const bool isLastDoc = (&doc == &wholeOp.getDocuments().back());
+        //对doc文档做检查，返回新的BSONObj。这里面会遍历所有的bson成员elem，并做相应的检查，并给该doc添加相应的ID
         auto fixedDoc = fixDocumentForInsert(opCtx->getServiceContext(), doc);
         if (!fixedDoc.isOK()) {
             // Handled after we insert anything in the batch to be sure we report errors in the
             // correct order. In an ordered insert, if one of the docs ahead of us fails, we should
             // behave as-if we never got to this document.
         } else {
-            const auto stmtId = getStmtIdForWriteOp(opCtx, wholeOp, stmtIdIndex++);
+            const auto stmtId = getStmtIdForWriteOp(opCtx, wholeOp, stmtIdIndex++); // 获取stdtid
             if (opCtx->getTxnNumber()) {
                 if (!opCtx->inMultiDocumentTransaction() &&
                     txnParticipant.checkStatementExecutedNoOplogEntryFetch(stmtId)) {
@@ -564,6 +575,7 @@ WriteResult performInserts(OperationContext* opCtx,
                 continue;  // Add more to batch before inserting.
         }
 
+        // 把batch数组中的doc文档写入存储引擎
         bool canContinue =
             insertBatchAndHandleErrors(opCtx, wholeOp, batch, &lastOpFixer, &out, fromMigrate);
         batch.clear();  // We won't need the current batch any more.
