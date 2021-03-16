@@ -1226,7 +1226,7 @@ const StringMap<ApplyOpMetadata> kOpsMap = {
          const OplogEntry& entry,
          OplogApplication::Mode mode,
          boost::optional<Timestamp> stableTimestampForRecovery) -> Status {
-         return applyCommitTransaction(opCtx, entry, mode);
+         return applyCommitTransaction(opCtx, entry, mode); // TODO:
      }}},
     {"abortTransaction",
      {[](OperationContext* opCtx,

@@ -87,17 +87,19 @@ public:
              const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         IDLParserErrorContext ctx("commitTransaction");
-        auto cmd = CommitTransaction::parse(ctx, cmdObj);
+        auto cmd = CommitTransaction::parse(ctx, cmdObj); // 解析关于提交事务的命令
 
         auto txnParticipant = TransactionParticipant::get(opCtx);
         uassert(ErrorCodes::CommandFailed,
                 "commitTransaction must be run within a transaction",
                 txnParticipant);
 
+        // 打印 Log， 这个在mongod.log中可见
         LOG(3) << "Received commitTransaction for transaction with txnNumber "
                << opCtx->getTxnNumber() << " on session " << opCtx->getLogicalSessionId()->toBSON();
 
         // commitTransaction is retryable.
+        // 事务的提交是可以重试的
         if (txnParticipant.transactionIsCommitted()) {
             // We set the client last op to the last optime observed by the system to ensure that
             // we wait for the specified write concern on an optime greater than or equal to the

@@ -441,6 +441,7 @@ Status CollectionImpl::insertDocuments(OperationContext* opCtx,
     }
 
     // Should really be done in the collection object at creation and updated on index create.
+    // 确认是否有id索引
     const bool hasIdIndex = _indexCatalog->findIdIndex(opCtx);
 
     for (auto it = begin; it != end; it++) {
@@ -458,12 +459,22 @@ Status CollectionImpl::insertDocuments(OperationContext* opCtx,
 
     const SnapshotId sid = opCtx->recoveryUnit()->getSnapshotId();
 
+    /*  http://www.mongoing.com/archives/5476
+	mongodb对某一行的写操作，会产生三个动作
+	
+	1 对wt层的数据段btree（上图中的Data Ident）执行写操作
+	2 对wt层索引段的每个索引btree执行写操作
+	3 对oplog表执行写操作
+	*/
+
+    //插入wiredtiger  1  2步骤
     status = _insertDocuments(opCtx, begin, end, opDebug);
     if (!status.isOK()) {
         return status;
     }
     invariant(sid == opCtx->recoveryUnit()->getSnapshotId());
 
+    // 更新Oplog  OpObserverImpl::onInserts
     getGlobalServiceContext()->getOpObserver()->onInserts(
         opCtx, ns(), uuid(), begin, end, fromMigrate);
 

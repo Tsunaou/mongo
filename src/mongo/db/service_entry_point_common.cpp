@@ -390,6 +390,7 @@ void _abortUnpreparedOrStashPreparedTransaction(
 }
 }  // namespace
 
+// watch out
 void invokeWithSessionCheckedOut(OperationContext* opCtx,
                                  CommandInvocation* invocation,
                                  const OperationSessionInfoFromClient& sessionOptions,

@@ -371,6 +371,9 @@ void WiredTigerRecoveryUnit::preallocateSnapshot() {
     getSession();
 }
 
+/*
+ * 关闭WiredTiger层的事务
+ */
 void WiredTigerRecoveryUnit::_txnClose(bool commit) {
     invariant(_isActive(), toString(_state));
     WT_SESSION* s = _session->getSession();

@@ -543,7 +543,8 @@ public:
          * 'txnState' is 'none' for retryable writes.
          *
          * Throws if the session has been invalidated or the active transaction number doesn't
-         * match.
+         * match
+         * Watch out.
          */
         void onWriteOpCompletedOnPrimary(OperationContext* opCtx,
                                          std::vector<StmtId> stmtIdsWritten,
