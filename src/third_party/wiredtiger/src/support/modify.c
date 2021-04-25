@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2020 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -115,12 +115,9 @@ __wt_modify_pack(WT_CURSOR *cursor, WT_MODIFY *entries, int nentries, WT_ITEM **
     /*
      * Update statistics. This is the common path called by WT_CURSOR::modify implementations.
      */
-    WT_STAT_CONN_INCR(session, cursor_modify);
-    WT_STAT_DATA_INCR(session, cursor_modify);
-    WT_STAT_CONN_INCRV(session, cursor_modify_bytes, cursor->value.size);
-    WT_STAT_DATA_INCRV(session, cursor_modify_bytes, cursor->value.size);
-    WT_STAT_CONN_INCRV(session, cursor_modify_bytes_touch, diffsz);
-    WT_STAT_DATA_INCRV(session, cursor_modify_bytes_touch, diffsz);
+    WT_STAT_CONN_DATA_INCR(session, cursor_modify);
+    WT_STAT_CONN_DATA_INCRV(session, cursor_modify_bytes, cursor->value.size);
+    WT_STAT_CONN_DATA_INCRV(session, cursor_modify_bytes_touch, diffsz);
 
     return (0);
 }

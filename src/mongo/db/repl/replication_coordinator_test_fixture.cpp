@@ -155,9 +155,8 @@ void ReplCoordTest::init() {
                                                          replicationProcess,
                                                          _storageInterface,
                                                          seed);
-    service->setFastClockSource(std::make_unique<executor::NetworkInterfaceMockClockSource>(_net));
-    service->setPreciseClockSource(
-        std::make_unique<executor::NetworkInterfaceMockClockSource>(_net));
+    service->setFastClockSource(std::make_unique<ClockSourceMock>());
+    service->setPreciseClockSource(std::make_unique<ClockSourceMock>());
 }
 
 void ReplCoordTest::init(const ReplSettings& settings) {
@@ -361,6 +360,9 @@ void ReplCoordTest::simulateSuccessfulV1ElectionWithoutExitingDrainMode(Date_t e
         ReplSetHeartbeatArgsV1 hbArgs;
         Status status = hbArgs.initialize(request.cmdObj);
         if (status.isOK()) {
+            if (replCoord->getMemberState().primary()) {
+                ASSERT_EQ(hbArgs.getPrimaryId(), replCoord->getMyId());
+            }
             ReplSetHeartbeatResponse hbResp;
             hbResp.setSetName(rsConfig.getReplSetName());
             hbResp.setState(MemberState::RS_SECONDARY);

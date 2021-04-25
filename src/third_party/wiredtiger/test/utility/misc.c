@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2020 MongoDB, Inc.
+ * Public Domain 2014-present MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -128,6 +128,40 @@ testutil_clean_work_dir(const char *dir)
     if ((ret = system(buf)) != 0 && ret != ENOENT)
         testutil_die(ret, "%s", buf);
     free(buf);
+}
+
+/*
+ * testutil_build_dir --
+ *     Get the git top level directory and concatenate the build directory.
+ */
+void
+testutil_build_dir(char *buf, int size)
+{
+    FILE *fp;
+    char *p;
+
+    /* Get the git top level directory. */
+#ifdef _WIN32
+    fp = _popen("git rev-parse --show-toplevel", "r");
+#else
+    fp = popen("git rev-parse --show-toplevel", "r");
+#endif
+
+    if (fp == NULL)
+        testutil_die(errno, "popen");
+    p = fgets(buf, size, fp);
+    if (p == NULL)
+        testutil_die(errno, "fgets");
+
+#ifdef _WIN32
+    _pclose(fp);
+#else
+    pclose(fp);
+#endif
+
+    /* Remove the trailing newline character added by fgets. */
+    buf[strlen(buf) - 1] = '\0';
+    strcat(buf, "/build_posix");
 }
 
 /*

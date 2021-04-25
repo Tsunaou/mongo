@@ -20,9 +20,10 @@ if (!_isWindows()) {
     const ret = runProgram(
         binshell, '-c', `echo password | ${mongo} --host ${host} --port ${port} --eval ${auth}`);
 
-    const output = rawMongoProgramOutput();
-    assert.eq(output.includes("Enter password:"), true, output);
-    assert.eq(output.includes("Successful authentication"), true, output);
+    assert.soon(() => {
+        const output = rawMongoProgramOutput();
+        return output.includes("Enter password:") && output.includes("Authentication succeeded");
+    });
 
     MongoRunner.stopMongod(conn);
 }

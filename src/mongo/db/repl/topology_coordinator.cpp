@@ -810,11 +810,15 @@ std::pair<ReplSetHeartbeatArgsV1, Milliseconds> TopologyCoordinator::prepareHear
         if (_rsConfig.getConfigTerm() != OpTime::kUninitializedTerm) {
             hbArgs.setConfigTerm(_rsConfig.getConfigTerm());
         }
-
+        if (_currentPrimaryIndex >= 0) {
+            // Send primary member id if one exists.
+            hbArgs.setPrimaryId(_memberData.at(_currentPrimaryIndex).getMemberId().getData());
+        }
         if (_selfIndex >= 0) {
             const MemberConfig& me = _selfConfig();
             hbArgs.setSenderId(me.getId().getData());
             hbArgs.setSenderHost(me.getHostAndPort());
+            hbArgs.setIsArbiter(me.isArbiter());
         }
         hbArgs.setTerm(_term);
     } else {
@@ -899,8 +903,11 @@ HeartbeatResponseAction TopologyCoordinator::processHeartbeatResponse(
             nextAction = HeartbeatResponseAction::makeReconfigAction();
             nextAction.setNextHeartbeatStartDate(nextHeartbeatStartDate);
 
-            // TODO(SERVER-48178) Only continue processing heartbeat in primary state to avoid
-            // concurrent reconfig and rollback.
+            // Only continue processing heartbeat in primary state. In other states it is not
+            // safe to continue processing heartbeat and should start reconfig right away.
+            // e.g. if this node was removed from replSet, _selfIndex is -1, and a following
+            // check on _selfIndex will keep retrying heartbeat to fetch new config, preventing
+            // the new config to be installed.
             if (_role != Role::kLeader) {
                 return nextAction;
             }
@@ -964,6 +971,7 @@ HeartbeatResponseAction TopologyCoordinator::processHeartbeatResponse(
     MemberData& hbData = _memberData.at(memberIndex);
     const MemberConfig member = _rsConfig.getMemberAt(memberIndex);
     bool advancedOpTimeOrUpdatedConfig = false;
+    bool becameElectable = false;
     if (!hbResponse.isOK()) {
         if (isUnauthorized) {
             hbData.setAuthIssue(now);
@@ -990,7 +998,9 @@ HeartbeatResponseAction TopologyCoordinator::processHeartbeatResponse(
                     "setUpValues: heartbeat response good",
                     "memberId"_attr = member.getId());
         pingsInConfig++;
+        auto wasUnelectable = hbData.isUnelectable();
         advancedOpTimeOrUpdatedConfig = hbData.setUpValues(now, std::move(hbr));
+        becameElectable = wasUnelectable && !hbData.isUnelectable();
     }
 
     _updatePrimaryFromHBDataV1(now);
@@ -1004,6 +1014,7 @@ HeartbeatResponseAction TopologyCoordinator::processHeartbeatResponse(
 
     nextAction.setNextHeartbeatStartDate(nextHeartbeatStartDate);
     nextAction.setAdvancedOpTimeOrUpdatedConfig(advancedOpTimeOrUpdatedConfig);
+    nextAction.setBecameElectable(becameElectable);
     return nextAction;
 }
 
@@ -1188,11 +1199,6 @@ std::pair<MemberId, Date_t> TopologyCoordinator::getStalestLiveMember() const {
                 "earliestMemberId"_attr = earliestMemberId,
                 "earliestDate"_attr = earliestDate);
     return std::make_pair(earliestMemberId, earliestDate);
-}
-
-void TopologyCoordinator::resetAllMemberTimeouts(Date_t now) {
-    for (auto&& memberData : _memberData)
-        memberData.updateLiveness(now);
 }
 
 void TopologyCoordinator::resetMemberTimeouts(Date_t now,
@@ -3163,9 +3169,13 @@ void TopologyCoordinator::setStorageEngineSupportsReadCommitted(bool supported) 
         supported ? ReadCommittedSupport::kYes : ReadCommittedSupport::kNo;
 }
 
-void TopologyCoordinator::restartHeartbeats() {
-    for (auto& hb : _memberData) {
-        hb.restart();
+void TopologyCoordinator::restartHeartbeat(const Date_t now, const HostAndPort& target) {
+    for (auto&& member : _memberData) {
+        if (member.getHostAndPort() == target) {
+            member.restart();
+            member.updateLiveness(now);
+            return;
+        }
     }
 }
 
@@ -3247,28 +3257,29 @@ TopologyCoordinator::latestKnownOpTimeSinceHeartbeatRestartPerMember() const {
     return opTimesPerMember;
 }
 
-bool TopologyCoordinator::checkIfCommitQuorumCanBeSatisfied(
+Status TopologyCoordinator::checkIfCommitQuorumCanBeSatisfied(
     const CommitQuorumOptions& commitQuorum) const {
     if (!commitQuorum.mode.empty() && commitQuorum.mode != CommitQuorumOptions::kMajority &&
         commitQuorum.mode != CommitQuorumOptions::kVotingMembers) {
         StatusWith<ReplSetTagPattern> tagPatternStatus =
             _rsConfig.findCustomWriteMode(commitQuorum.mode);
         if (!tagPatternStatus.isOK()) {
-            return false;
+            return tagPatternStatus.getStatus();
         }
 
         ReplSetTagMatch matcher(tagPatternStatus.getValue());
         for (auto&& member : _rsConfig.members()) {
             for (MemberConfig::TagIterator it = member.tagsBegin(); it != member.tagsEnd(); ++it) {
                 if (matcher.update(*it)) {
-                    return true;
+                    return Status::OK();
                 }
             }
         }
 
         // Even if all the nodes in the set had a given write it still would not satisfy this
         // commit quorum.
-        return false;
+        return {ErrorCodes::UnsatisfiableCommitQuorum,
+                "Commit quorum cannot be satisfied with the current replica set configuration"};
     }
 
     int nodesRemaining = commitQuorum.numNodes;
@@ -3280,15 +3291,37 @@ bool TopologyCoordinator::checkIfCommitQuorumCanBeSatisfied(
         }
     }
 
+    bool votingBuildIndexesFalseNodes = false;
     for (auto&& member : _rsConfig.members()) {
-        if (!member.isArbiter()) {  // Only count data-bearing nodes
-            --nodesRemaining;
-            if (nodesRemaining <= 0) {
-                return true;
-            }
+        // Only count data-bearing nodes.
+        if (member.isArbiter()) {
+            continue;
+        }
+
+        // Only count voting nodes that build indexes.
+        if (member.isVoter() && !member.shouldBuildIndexes()) {
+            votingBuildIndexesFalseNodes = true;
+            continue;
+        }
+
+        --nodesRemaining;
+        if (nodesRemaining <= 0) {
+            return Status::OK();
         }
     }
-    return false;
+
+    // Voting, buildIndexes:false nodes can be included in a commitQuorum but never actually build
+    // indexes and vote to commit. Provide a helpful error message to prevent users from starting
+    // index builds that will never commit.
+    if (votingBuildIndexesFalseNodes) {
+        return {ErrorCodes::UnsatisfiableCommitQuorum,
+                str::stream()
+                    << "Commit quorum cannot depend on voting buildIndexes:false nodes; "
+                    << "use a commit quorum that excludes these nodes or do not give them votes"};
+    }
+
+    return {ErrorCodes::UnsatisfiableCommitQuorum,
+            "Not enough data-bearing voting nodes to satisfy commit quorum"};
 }
 
 }  // namespace repl

@@ -112,6 +112,7 @@ MONGO_FAIL_POINT_DEFINE(sleepMillisAfterCommandExecutionBegins);
 MONGO_FAIL_POINT_DEFINE(waitAfterNewStatementBlocksBehindPrepare);
 MONGO_FAIL_POINT_DEFINE(waitAfterCommandFinishesExecution);
 MONGO_FAIL_POINT_DEFINE(failWithErrorCodeInRunCommand);
+MONGO_FAIL_POINT_DEFINE(hangBeforeSessionCheckOut);
 
 // Tracks the number of times a legacy unacknowledged write failed due to
 // not primary error resulted in network disconnection.
@@ -443,8 +444,9 @@ void appendClusterAndOperationTime(OperationContext* opCtx,
                                    BSONObjBuilder* commandBodyFieldsBob,
                                    BSONObjBuilder* metadataBob,
                                    LogicalTime startTime) {
-    if (repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
-            repl::ReplicationCoordinator::modeReplSet ||
+    auto replicationCoordinator = repl::ReplicationCoordinator::get(opCtx);
+    if (replicationCoordinator->getReplicationMode() != repl::ReplicationCoordinator::modeReplSet ||
+        !replicationCoordinator->getMemberState().readable() ||
         !LogicalClock::get(opCtx)->isEnabled()) {
         return;
     }
@@ -555,6 +557,7 @@ void invokeWithSessionCheckedOut(OperationContext* opCtx,
     // This constructor will check out the session. It handles the appropriate state management
     // for both multi-statement transactions and retryable writes. Currently, only requests with
     // a transaction number will check out the session.
+    hangBeforeSessionCheckOut.pauseWhileSet();
     MongoDOperationContextSession sessionTxnState(opCtx);
     auto txnParticipant = TransactionParticipant::get(opCtx);
 
@@ -1029,6 +1032,13 @@ void execCommandDatabase(OperationContext* opCtx,
         if (!opCtx->getClient()->isInDirectClient() &&
             !MONGO_unlikely(skipCheckingForNotPrimaryInCommandDispatch.shouldFail())) {
             const bool inMultiDocumentTransaction = (sessionOptions.getAutocommit() == false);
+
+            // Kill this operation on step down even if it hasn't taken write locks yet, because it
+            // could conflict with transactions from a new primary.
+            if (inMultiDocumentTransaction) {
+                opCtx->setAlwaysInterruptAtStepDownOrUp();
+            }
+
             auto allowed = command->secondaryAllowed(opCtx->getServiceContext());
             bool alwaysAllowed = allowed == Command::AllowedOnSecondary::kAlways;
             bool couldHaveOptedIn =
@@ -1037,13 +1047,18 @@ void execCommandDatabase(OperationContext* opCtx,
                 couldHaveOptedIn && ReadPreferenceSetting::get(opCtx).canRunOnSecondary();
             bool canRunHere = commandCanRunHere(opCtx, dbname, command, inMultiDocumentTransaction);
             if (!canRunHere && couldHaveOptedIn) {
-                uasserted(ErrorCodes::NotPrimaryNoSecondaryOk, "not master and slaveOk=false");
+                const auto msg = opCtx->getClient()->supportsHello()
+                    ? "not primary and secondaryOk=false"_sd
+                    : "not master and slaveOk=false"_sd;
+                uasserted(ErrorCodes::NotPrimaryNoSecondaryOk, msg);
             }
 
             if (MONGO_unlikely(respondWithNotPrimaryInCommandDispatch.shouldFail())) {
                 uassert(ErrorCodes::NotWritablePrimary, "not primary", canRunHere);
             } else {
-                uassert(ErrorCodes::NotWritablePrimary, "not master", canRunHere);
+                const auto msg =
+                    opCtx->getClient()->supportsHello() ? "not primary"_sd : "not master"_sd;
+                uassert(ErrorCodes::NotWritablePrimary, msg, canRunHere);
             }
 
             if (!command->maintenanceOk() &&
@@ -1419,9 +1434,10 @@ DbResponse receivedCommands(OperationContext* opCtx,
         if (LastError::get(opCtx->getClient()).hadNotPrimaryError()) {
             if (c && c->getReadWriteType() == Command::ReadWriteType::kWrite)
                 notPrimaryUnackWrites.increment();
+
             uasserted(ErrorCodes::NotWritablePrimary,
                       str::stream()
-                          << "Not-master error while processing '" << request.getCommandName()
+                          << "Not-primary error while processing '" << request.getCommandName()
                           << "' operation  on '" << request.getDatabase() << "' database via "
                           << "fire-and-forget command execution.");
         }

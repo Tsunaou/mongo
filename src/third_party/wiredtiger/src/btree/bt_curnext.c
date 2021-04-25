@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2020 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -57,7 +57,7 @@ __cursor_fix_append_next(WT_CURSOR_BTREE *cbt, bool newpage, bool restart)
         cbt->iface.value.data = &cbt->v;
     } else {
 restart_read:
-        WT_RET(__wt_txn_read_upd_list(session, cbt, cbt->ins->upd, NULL));
+        WT_RET(__wt_txn_read_upd_list(session, cbt, cbt->ins->upd));
         if (cbt->upd_value->type == WT_UPDATE_INVALID) {
             cbt->v = 0;
             cbt->iface.value.data = &cbt->v;
@@ -157,7 +157,7 @@ new_page:
 
         __cursor_set_recno(cbt, WT_INSERT_RECNO(cbt->ins));
 restart_read:
-        WT_RET(__wt_txn_read_upd_list(session, cbt, cbt->ins->upd, NULL));
+        WT_RET(__wt_txn_read_upd_list(session, cbt, cbt->ins->upd));
 
         if (cbt->upd_value->type == WT_UPDATE_INVALID) {
             ++*skippedp;
@@ -232,7 +232,7 @@ restart_read:
         cbt->ins = __col_insert_search_match(cbt->ins_head, cbt->recno);
         __wt_upd_value_clear(cbt->upd_value);
         if (cbt->ins != NULL)
-            WT_RET(__wt_txn_read_upd_list(session, cbt, cbt->ins->upd, NULL));
+            WT_RET(__wt_txn_read_upd_list(session, cbt, cbt->ins->upd));
         if (cbt->upd_value->type != WT_UPDATE_INVALID) {
             if (cbt->upd_value->type == WT_UPDATE_TOMBSTONE) {
                 if (cbt->upd_value->tw.stop_txn != WT_TXN_NONE &&
@@ -365,7 +365,7 @@ restart_read_insert:
         if ((ins = cbt->ins) != NULL) {
             key->data = WT_INSERT_KEY(ins);
             key->size = WT_INSERT_KEY_SIZE(ins);
-            WT_RET(__wt_txn_read_upd_list(session, cbt, ins->upd, NULL));
+            WT_RET(__wt_txn_read_upd_list(session, cbt, ins->upd));
             if (cbt->upd_value->type == WT_UPDATE_INVALID) {
                 ++*skippedp;
                 continue;
@@ -478,14 +478,15 @@ __cursor_key_order_check_row(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt, boo
     WT_ERR(__wt_scr_alloc(session, 512, &a));
     WT_ERR(__wt_scr_alloc(session, 512, &b));
 
+    WT_ERR(
+      __wt_msg(session, "WT_CURSOR.%s out-of-order returns: returned key %.1024s then key %.1024s",
+        next ? "next" : "prev",
+        __wt_buf_set_printable_format(
+          session, cbt->lastkey->data, cbt->lastkey->size, btree->key_format, a),
+        __wt_buf_set_printable_format(session, key->data, key->size, btree->key_format, b)));
     WT_ERR(__wt_msg(session, "dumping the cursor page"));
     WT_ERR(__wt_debug_cursor_page(&cbt->iface, NULL));
-    WT_ERR_PANIC(session, EINVAL,
-      "WT_CURSOR.%s out-of-order returns: returned key %.1024s then key %.1024s",
-      next ? "next" : "prev",
-      __wt_buf_set_printable_format(
-        session, cbt->lastkey->data, cbt->lastkey->size, btree->key_format, a),
-      __wt_buf_set_printable_format(session, key->data, key->size, btree->key_format, b));
+    WT_ERR_PANIC(session, EINVAL, "found key out-of-order returns");
 
 err:
     __wt_scr_free(session, &a);
@@ -639,8 +640,7 @@ __wt_btcur_next(WT_CURSOR_BTREE *cbt, bool truncating)
     session = CUR2S(cbt);
     total_skipped = 0;
 
-    WT_STAT_CONN_INCR(session, cursor_next);
-    WT_STAT_DATA_INCR(session, cursor_next);
+    WT_STAT_CONN_DATA_INCR(session, cursor_next);
 
     flags = WT_READ_NO_SPLIT | WT_READ_SKIP_INTL; /* tree walk flags */
     if (truncating)
@@ -737,16 +737,12 @@ __wt_btcur_next(WT_CURSOR_BTREE *cbt, bool truncating)
     }
 
 err:
-    if (total_skipped < 100) {
-        WT_STAT_CONN_INCR(session, cursor_next_skip_lt_100);
-        WT_STAT_DATA_INCR(session, cursor_next_skip_lt_100);
-    } else {
-        WT_STAT_CONN_INCR(session, cursor_next_skip_ge_100);
-        WT_STAT_DATA_INCR(session, cursor_next_skip_ge_100);
-    }
+    if (total_skipped < 100)
+        WT_STAT_CONN_DATA_INCR(session, cursor_next_skip_lt_100);
+    else
+        WT_STAT_CONN_DATA_INCR(session, cursor_next_skip_ge_100);
 
-    WT_STAT_CONN_INCRV(session, cursor_next_skip_total, total_skipped);
-    WT_STAT_DATA_INCRV(session, cursor_next_skip_total, total_skipped);
+    WT_STAT_CONN_DATA_INCRV(session, cursor_next_skip_total, total_skipped);
 
     switch (ret) {
     case 0:

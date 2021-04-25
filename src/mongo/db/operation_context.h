@@ -36,6 +36,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/db/logical_session_id.h"
+#include "mongo/db/operation_id.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/write_unit_of_work.h"
@@ -53,7 +54,6 @@
 
 namespace mongo {
 
-class Client;
 class CurOp;
 class ProgressMeter;
 class ServiceContext;
@@ -79,7 +79,12 @@ class OperationContext : public Interruptible, public Decorable<OperationContext
     OperationContext& operator=(const OperationContext&) = delete;
 
 public:
+    /**
+     * Creates an op context with no unique operation ID tracking - prefer using the OperationIdSlot
+     * CTOR if possible to avoid OperationId collisions.
+     */
     OperationContext(Client* client, OperationId opId);
+    OperationContext(Client* client, OperationIdSlot&& opIdSlot);
     virtual ~OperationContext();
 
     bool shouldParticipateInFlowControl() const {
@@ -167,7 +172,7 @@ public:
      * Returns the operation ID associated with this operation.
      */
     OperationId getOpID() const {
-        return _opId;
+        return _opId.getId();
     }
 
     /**
@@ -407,6 +412,22 @@ public:
     }
 
     /**
+     * Sets that this operation should always get killed during stepDown and stepUp, regardless of
+     * whether or not it's taken a write lock.
+     */
+    void setAlwaysInterruptAtStepDownOrUp() {
+        _alwaysInterruptAtStepDownOrUp.store(true);
+    }
+
+    /**
+     * Indicates that this operation should always get killed during stepDown and stepUp, regardless
+     * of whether or not it's taken a write lock.
+     */
+    bool shouldAlwaysInterruptAtStepDownOrUp() {
+        return _alwaysInterruptAtStepDownOrUp.load();
+    }
+
+    /**
      * Clears metadata associated with a multi-document transaction.
      */
     void resetMultiDocumentTransactionState() {
@@ -546,7 +567,7 @@ private:
 
     Client* const _client;
 
-    const OperationId _opId;
+    const OperationIdSlot _opId;
     boost::optional<OperationKey> _opKey;
 
     boost::optional<LogicalSessionId> _lsid;
@@ -599,6 +620,10 @@ private:
     bool _shouldParticipateInFlowControl = true;
     bool _inMultiDocumentTransaction = false;
     bool _isStartingMultiDocumentTransaction = false;
+
+    // If true, this OpCtx will get interrupted during replica set stepUp and stepDown, regardless
+    // of what locks it's taken.
+    AtomicWord<bool> _alwaysInterruptAtStepDownOrUp{false};
 
     // If populated, this is an owned singleton BSONObj whose only field, 'comment', is a copy of
     // the 'comment' field from the input command object.

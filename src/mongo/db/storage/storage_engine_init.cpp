@@ -40,6 +40,7 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/storage/control/storage_control.h"
 #include "mongo/db/storage/storage_engine_lock_file.h"
 #include "mongo/db/storage/storage_engine_metadata.h"
 #include "mongo/db/storage/storage_options.h"
@@ -184,6 +185,10 @@ LastStorageEngineShutdownState initializeStorageEngine(ServiceContext* service,
 
 void shutdownGlobalStorageEngineCleanly(ServiceContext* service) {
     invariant(service->getStorageEngine());
+    StorageControl::stopStorageControls(
+        service,
+        {ErrorCodes::ShutdownInProgress, "The storage catalog is being closed."},
+        /*forRestart=*/false);
     service->getStorageEngine()->cleanShutdown();
     auto& lockFile = StorageEngineLockFile::get(service);
     if (lockFile) {
